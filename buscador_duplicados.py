@@ -76,6 +76,7 @@ def _calidad(path):
 class ScanWorker(QObject):
     progreso = Signal(int, int, str)     # hechos, total, texto
     terminado = Signal(list)             # lista de grupos (cada grupo = lista de rutas)
+    cancelado = Signal()                 # el escaneo se detuvo a petición del usuario
     error = Signal(str)
 
     def __init__(self, carpeta, modo, umbral):
@@ -103,6 +104,7 @@ class ScanWorker(QObject):
             else:
                 grupos = self._similares(archivos)
             if self._cancelar:
+                self.cancelado.emit()
                 return
             # ordenar: más archivos primero
             grupos.sort(key=lambda g: len(g), reverse=True)
@@ -250,21 +252,32 @@ class Ventana(QWidget):
         # barra superior
         top = QFrame(); top.setObjectName("top")
         tl = QHBoxLayout(top); tl.setContentsMargins(16, 12, 16, 12); tl.setSpacing(10)
-        self.btn_carpeta = QPushButton("📂  Elegir carpeta"); self.btn_carpeta.setObjectName("accent")
+        # controles tipo "reproductor": Abrir · Escanear · Cancelar
+        self.btn_carpeta = QPushButton("📂  Abrir carpeta"); self.btn_carpeta.setObjectName("accent")
         self.btn_carpeta.clicked.connect(self._elegir)
+        self.btn_scan = QPushButton("🔎  Escanear"); self.btn_scan.setObjectName("accent")
+        self.btn_scan.clicked.connect(self._escanear); self.btn_scan.setEnabled(False)
+        self.btn_cancel = QPushButton("⏹  Cancelar"); self.btn_cancel.setObjectName("danger")
+        self.btn_cancel.clicked.connect(self._cancelar_scan); self.btn_cancel.setEnabled(False)
         self.lbl_carpeta = QLabel("Ninguna carpeta seleccionada"); self.lbl_carpeta.setObjectName("ruta")
-        self.lbl_carpeta.setSizePolicy(self.lbl_carpeta.sizePolicy().horizontalPolicy(), self.lbl_carpeta.sizePolicy().verticalPolicy())
         tl.addWidget(self.btn_carpeta)
+        tl.addWidget(self.btn_scan)
+        tl.addWidget(self.btn_cancel)
         tl.addWidget(self.lbl_carpeta, 1)
 
         tl.addWidget(QLabel("Modo:"))
         self.combo = QComboBox()
-        self.combo.addItem("Exactos (idénticos)", "exactos")
-        self.combo.addItem("Similares (parecidos)", "similares")
+        self.combo.addItem("Exactos · idénticos 100%", "exactos")
+        self.combo.addItem("Similares · parecidos 95%", "similares")
         self.combo.currentIndexChanged.connect(self._modo_cambio)
         tl.addWidget(self.combo)
+        self.btn_info = QPushButton("ℹ️"); self.btn_info.setObjectName("info")
+        self.btn_info.setFixedWidth(40); self.btn_info.setToolTip("¿Qué es cada modo?")
+        self.btn_info.clicked.connect(self._info_modos)
+        tl.addWidget(self.btn_info)
 
-        self.umbral_wrap = QWidget(); uw = QHBoxLayout(self.umbral_wrap); uw.setContentsMargins(0, 0, 0, 0)
+        self.umbral_wrap = QWidget(); self.umbral_wrap.setObjectName("transp")
+        uw = QHBoxLayout(self.umbral_wrap); uw.setContentsMargins(0, 0, 0, 0)
         uw.addWidget(QLabel("Parecido:"))
         self.slider = QSlider(Qt.Orientation.Horizontal); self.slider.setFixedWidth(110)
         self.slider.setRange(0, 16); self.slider.setValue(5)
@@ -273,10 +286,6 @@ class Ventana(QWidget):
         uw.addWidget(self.slider); uw.addWidget(self.lbl_umbral)
         tl.addWidget(self.umbral_wrap)
         self.umbral_wrap.hide()
-
-        self.btn_scan = QPushButton("🔎  Escanear"); self.btn_scan.setObjectName("accent")
-        self.btn_scan.clicked.connect(self._escanear); self.btn_scan.setEnabled(False)
-        tl.addWidget(self.btn_scan)
         root.addWidget(top)
 
         # progreso
@@ -329,6 +338,21 @@ class Ventana(QWidget):
     def _modo_cambio(self):
         self.umbral_wrap.setVisible(self.combo.currentData() == "similares")
 
+    def _info_modos(self):
+        m = QMessageBox(self)
+        m.setWindowTitle("¿Qué modo elegir?")
+        m.setTextFormat(Qt.TextFormat.RichText)
+        m.setText(
+            "<h3>🟦 Exactos · idénticos 100%</h3>"
+            "<p>Encuentra archivos <b>exactamente iguales</b>, byte a byte: la misma imagen copiada "
+            "tal cual. Segurísimo — si coinciden, es literalmente el mismo archivo.</p>"
+            "<h3>🟪 Similares · parecidos 95%</h3>"
+            "<p>Encuentra imágenes que <b>se parecen</b> aunque no sean idénticas: redimensionadas, "
+            "recomprimidas, guardadas en otro formato o con pequeños retoques.<br>"
+            "Usa el control <b>«Parecido»</b> para exigir más (menos resultados, más idénticas) "
+            "o menos (más resultados, algo más distintas).</p>")
+        m.exec()
+
     # ---------- flujo
     def _elegir(self):
         d = QFileDialog.getExistingDirectory(self, "Elige la carpeta a revisar")
@@ -345,6 +369,7 @@ class Ventana(QWidget):
             return
         self._limpiar_resultados()
         self.btn_scan.setEnabled(False); self.btn_carpeta.setEnabled(False); self.combo.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
         self.barra.setRange(0, 0)   # indeterminada hasta el primer progreso
         self.estado.setText("Escaneando…")
 
@@ -354,8 +379,21 @@ class Ventana(QWidget):
         self.hilo.started.connect(self.worker.run)
         self.worker.progreso.connect(self._on_progreso)
         self.worker.terminado.connect(self._on_terminado)
+        self.worker.cancelado.connect(self._on_cancelado)
         self.worker.error.connect(self._on_error)
         self.hilo.start()
+
+    def _cancelar_scan(self):
+        """Detiene el escaneo en curso para poder empezar otro."""
+        if self.worker:
+            self.worker.cancelar()
+            self.btn_cancel.setEnabled(False)
+            self.estado.setText("Cancelando…")
+
+    def _on_cancelado(self):
+        self._fin_hilo()
+        self.barra.setRange(0, 100); self.barra.setValue(0)
+        self.estado.setText("⏹  Escaneo cancelado. Puedes empezar otro.")
 
     def _on_progreso(self, hechos, total, texto):
         if self.barra.maximum() != total:
@@ -391,6 +429,7 @@ class Ventana(QWidget):
             self.hilo.quit(); self.hilo.wait()
         self.hilo = None; self.worker = None
         self.btn_scan.setEnabled(True); self.btn_carpeta.setEnabled(True); self.combo.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
 
     def _recuperable(self, grupo):
         """Bytes que se recuperan si borramos todo menos la mejor copia."""
@@ -497,19 +536,27 @@ class Ventana(QWidget):
 
 QSS = """
 * { font-family: 'Segoe UI'; font-size: 13px; }
-QWidget { background: #0f1420; color: #e6e9f2; }
-QLabel#ruta { color: #93a1c0; }
-QLabel#estado { color: #cdd5ea; }
-QLabel#meta { color: #8b97b5; font-size: 12px; }
+QWidget { background: #0f1420; color: #ffffff; }
+/* Las etiquetas NO pintan fondo: heredan el del panel donde están (evita los recuadros). */
+QLabel { background: transparent; color: #ffffff; }
+QWidget#transp { background: transparent; }
+QScrollArea > QWidget > QWidget { background: transparent; }
+QLabel#ruta { color: #cbd3e6; }
+QLabel#estado { color: #ffffff; }
+QLabel#meta { color: #aeb7d1; font-size: 12px; }
 QFrame#top, QFrame#bottom { background: #141b2b; border: none; }
 QFrame#progbar { background: #0f1420; }
-QPushButton { background: #263149; color: #fff; border: none; border-radius: 9px; padding: 9px 14px; font-weight: 600; }
+QPushButton { background: #263149; color: #ffffff; border: none; border-radius: 9px; padding: 9px 14px; font-weight: 600; }
 QPushButton:hover { background: #30405f; }
-QPushButton:disabled { background: #1a2233; color: #55607a; }
-QPushButton#accent { background: #3b82f6; }
+QPushButton:disabled { background: #1a2233; color: #c3ccdf; }
+QPushButton#accent { background: #3b82f6; color: #ffffff; }
 QPushButton#accent:hover { background: #2f6fe0; }
-QPushButton#danger { background: #e0424d; }
+QPushButton#accent:disabled { background: #2b3f66; color: #ffffff; }
+QPushButton#danger { background: #e0424d; color: #ffffff; }
 QPushButton#danger:hover { background: #c8303b; }
+QPushButton#danger:disabled { background: #5e2b30; color: #ffffff; }
+QPushButton#info { background: #1a2233; color: #ffffff; font-size: 15px; padding: 8px 4px; }
+QPushButton#info:hover { background: #263149; }
 QPushButton#ghost { background: transparent; border: 1px solid #2c3852; color: #b9c3dc; }
 QPushButton#ghost:hover { background: #1a2233; }
 QComboBox { background: #1a2233; border: 1px solid #2c3852; border-radius: 8px; padding: 6px 10px; }
@@ -524,9 +571,10 @@ QFrame#tarjeta { background: #141b2b; border: 1px solid #232f47; border-radius: 
 QFrame#tarjeta[marcado="true"] { border: 2px solid #e0424d; background: #1b1622; }
 QFrame#tarjeta[keep="true"] { border: 2px solid #22c55e; }
 QLabel#thumb { background: #0b0f19; border-radius: 8px; color: #55607a; }
-QLabel#nombre { font-weight: 600; font-size: 12px; }
-QLabel#badge_keep { background: #16351f; color: #4ade80; border-radius: 6px; padding: 5px; font-weight: 700; }
-QCheckBox { color: #f0a0a6; font-weight: 600; }
+QLabel#nombre { color: #ffffff; font-weight: 600; font-size: 12px; }
+QLabel#badge_keep { background: #16351f; color: #6ee7a0; border-radius: 6px; padding: 5px; font-weight: 700; }
+QCheckBox { color: #ffffff; font-weight: 600; background: transparent; }
+QCheckBox::indicator { width: 16px; height: 16px; }
 QSlider::groove:horizontal { height: 5px; background: #2c3852; border-radius: 2px; }
 QSlider::handle:horizontal { background: #3b82f6; width: 15px; margin: -6px 0; border-radius: 7px; }
 """
