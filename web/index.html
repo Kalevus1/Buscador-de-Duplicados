@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Buscador de Duplicados — Web</title>
+<style>
+  :root{ --bg:#0f1420; --card:#141b2b; --ink:#e6e9f2; --muted:#93a1c0; --line:#232f47;
+    --brand:#3b82f6; --green:#22c55e; --red:#e0424d; --amber:#f6c445; }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);
+    color:var(--ink);line-height:1.5}
+  .wrap{max-width:1100px;margin:0 auto;padding:18px}
+  h1{font-size:1.5rem;margin:0 0 2px} .sub{color:var(--muted);margin:0 0 14px;font-size:.95rem}
+  .warn{background:#2a2410;border:1px solid #5c4d16;border-left:5px solid var(--amber);
+    border-radius:12px;padding:12px 16px;margin:0 0 16px;font-size:.92rem}
+  .warn b{color:var(--amber)}
+  .bar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+  button{background:#263149;color:#fff;border:none;border-radius:9px;padding:10px 16px;font-weight:600;
+    cursor:pointer;font-size:.95rem} button:hover{background:#30405f}
+  button.accent{background:var(--brand)} button.accent:hover{background:#2f6fe0}
+  button:disabled{background:#1a2233;color:#55607a;cursor:default}
+  select,input[type=range]{background:#1a2233;color:#fff;border:1px solid var(--line);border-radius:8px;padding:8px}
+  .prog{height:8px;background:#1a2233;border-radius:4px;overflow:hidden;margin:8px 0}
+  .prog>div{height:100%;background:var(--brand);width:0}
+  .status{color:var(--muted);font-size:.9rem;min-height:20px}
+  .grupo{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin:12px 0}
+  .grupo h3{margin:0 0 10px;font-size:1rem}
+  .thumbs{display:flex;gap:12px;flex-wrap:wrap}
+  .th{width:170px;border:2px solid var(--line);border-radius:12px;overflow:hidden;background:#0b0f19}
+  .th.keep{border-color:var(--green)} .th img{width:100%;height:120px;object-fit:cover;display:block;background:#0b0f19}
+  .th .m{padding:8px 10px;font-size:.78rem;color:var(--muted)}
+  .th .tag{display:block;font-weight:700;font-size:.72rem;margin-bottom:2px}
+  .th.keep .tag{color:var(--green)}
+  .empty{color:var(--muted);text-align:center;padding:40px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🔍 Buscador de Duplicados <span style="color:var(--muted);font-weight:400;font-size:1rem">· web</span></h1>
+  <p class="sub">Escanea una carpeta y encuentra imágenes duplicadas o parecidas, aquí en el navegador.</p>
+
+  <div class="warn">⚠️ <b>Esta versión web solo MUESTRA los duplicados: no puede borrar archivos</b>
+    (los navegadores no lo permiten por seguridad). Para enviarlos a la papelera, usa la
+    <b>app de escritorio</b> (el <code>.exe</code>).</div>
+
+  <div id="nosop" class="warn" style="display:none;border-left-color:var(--red);background:#2a1416;border-color:#5c1a1e">
+    ❌ Tu navegador no permite elegir carpetas (necesitas <b>Chrome</b> o <b>Edge</b> de escritorio).
+  </div>
+
+  <div class="bar">
+    <button id="pick" class="accent">📂 Elegir carpeta</button>
+    <label>Modo:
+      <select id="modo">
+        <option value="exactos">Exactos (idénticos)</option>
+        <option value="similares">Similares (parecidos)</option>
+      </select>
+    </label>
+    <span id="umbralwrap" style="display:none">Parecido:
+      <input id="umbral" type="range" min="0" max="16" value="6" style="vertical-align:middle">
+      <span id="umbralval" style="color:var(--muted)">6</span>
+    </span>
+    <button id="scan" class="accent" disabled>🔎 Escanear</button>
+  </div>
+
+  <div class="prog"><div id="progfill"></div></div>
+  <div class="status" id="status">Elige una carpeta para empezar (Chrome o Edge).</div>
+
+  <div id="result"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let dirHandle = null;
+
+if (!window.showDirectoryPicker) { $('nosop').style.display='block'; $('pick').disabled=true; }
+$('modo').onchange = () => $('umbralwrap').style.display = $('modo').value==='similares' ? 'inline' : 'none';
+$('umbral').oninput = () => $('umbralval').textContent = $('umbral').value;
+
+$('pick').onclick = async () => {
+  try {
+    dirHandle = await window.showDirectoryPicker();
+    $('scan').disabled = false;
+    $('status').textContent = 'Carpeta lista: ' + dirHandle.name + '. Pulsa «Escanear».';
+    $('result').innerHTML = '';
+  } catch(e) { /* cancelado */ }
+};
+
+const EXTS = ['.png','.jpg','.jpeg','.bmp','.gif','.tiff','.webp'];
+const esImagen = n => EXTS.some(e => n.toLowerCase().endsWith(e));
+
+async function* recorrer(handle, ruta='') {
+  for await (const [nombre, h] of handle.entries()) {
+    const p = ruta ? ruta + '/' + nombre : nombre;
+    if (h.kind === 'file') { if (esImagen(nombre)) yield {handle:h, ruta:p}; }
+    else if (h.kind === 'directory') { yield* recorrer(h, p); }
+  }
+}
+
+async function sha256(buf) {
+  const d = await crypto.subtle.digest('SHA-256', buf);
+  return [...new Uint8Array(d)].map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+// dHash 8x8 -> 64 bits (BigInt)
+async function dhash(blob) {
+  const bmp = await createImageBitmap(blob);
+  const w=9,h=8, c=document.createElement('canvas'); c.width=w; c.height=h;
+  const ctx=c.getContext('2d'); ctx.drawImage(bmp,0,0,w,h); bmp.close();
+  const px=ctx.getImageData(0,0,w,h).data;
+  const g=(x,y)=>{const i=(y*w+x)*4; return 0.299*px[i]+0.587*px[i+1]+0.114*px[i+2];};
+  let bits=0n, bit=0n;
+  for(let y=0;y<h;y++) for(let x=0;x<w-1;x++){ if(g(x,y)>g(x+1,y)) bits|=(1n<<bit); bit++; }
+  return bits;
+}
+const hamming = (a,b)=>{ let x=a^b, n=0n; while(x){ n+=x&1n; x>>=1n; } return Number(n); };
+
+function progreso(hechos,total,txt){ $('progfill').style.width=(total?100*hechos/total:0)+'%'; $('status').textContent=txt; }
+
+$('scan').onclick = async () => {
+  if (!dirHandle) return;
+  $('scan').disabled=true; $('pick').disabled=true; $('result').innerHTML='';
+  $('status').textContent='Listando archivos…';
+  const archivos=[];
+  for await (const f of recorrer(dirHandle)) archivos.push(f);
+  if (!archivos.length){ terminar([]); return; }
+
+  const modo=$('modo').value, umbral=parseInt($('umbral').value,10);
+  const datos=[]; // {ruta, file, hash, w, h, size}
+  for (let i=0;i<archivos.length;i++){
+    try{
+      const file = await archivos[i].handle.getFile();
+      let hash;
+      if (modo==='exactos') hash = await sha256(await file.arrayBuffer());
+      else hash = await dhash(file);
+      // dimensiones
+      let dim=null; try{ const b=await createImageBitmap(file); dim=[b.width,b.height]; b.close(); }catch(e){}
+      datos.push({ruta:archivos[i].ruta, file, hash, dim, size:file.size});
+    }catch(e){}
+    if (i%5===0 || i===archivos.length-1) progreso(i+1,archivos.length,`Analizando ${i+1}/${archivos.length}…`);
+    await new Promise(r=>setTimeout(r)); // no congelar la UI
+  }
+
+  // agrupar
+  let grupos=[];
+  if (modo==='exactos'){
+    const m={}; datos.forEach(d=>{ (m[d.hash]=m[d.hash]||[]).push(d); });
+    grupos = Object.values(m).filter(g=>g.length>1);
+  } else {
+    const n=datos.length, padre=[...Array(n).keys()];
+    const find=x=>{ while(padre[x]!==x){ padre[x]=padre[padre[x]]; x=padre[x]; } return x; };
+    for(let a=0;a<n;a++) for(let b=a+1;b<n;b++) if(hamming(datos[a].hash,datos[b].hash)<=umbral){ padre[find(a)]=find(b); }
+    const comp={}; for(let i=0;i<n;i++){ const r=find(i); (comp[r]=comp[r]||[]).push(datos[i]); }
+    grupos = Object.values(comp).filter(g=>g.length>1);
+  }
+  grupos.sort((a,b)=>b.length-a.length);
+  terminar(grupos);
+};
+
+function calidad(d){ return (d.dim?d.dim[0]*d.dim[1]:0)*1e12 + d.size; }
+
+function terminar(grupos){
+  $('scan').disabled=false; $('pick').disabled=false; $('progfill').style.width='0';
+  const R=$('result');
+  if(!grupos.length){ $('status').textContent='✅ No se encontraron duplicados.'; R.innerHTML='<div class="empty">¡Todo limpio! 🎉</div>'; return; }
+  const totalArch=grupos.reduce((s,g)=>s+g.length,0);
+  const recup=grupos.reduce((s,g)=>{ const mejor=g.reduce((m,d)=>calidad(d)>calidad(m)?d:m); return s+g.reduce((ss,d)=>ss+(d===mejor?0:d.size),0); },0);
+  $('status').textContent=`✅ ${grupos.length} grupos · ${totalArch} archivos · ~${(recup/1048576).toFixed(1)} MB en copias.`;
+  R.innerHTML='';
+  grupos.forEach((g,i)=>{
+    const mejor=g.reduce((m,d)=>calidad(d)>calidad(m)?d:m);
+    const orden=[mejor,...g.filter(d=>d!==mejor)];
+    const div=document.createElement('div'); div.className='grupo';
+    div.innerHTML=`<h3>Grupo ${i+1} · ${g.length} imágenes</h3>`;
+    const th=document.createElement('div'); th.className='thumbs';
+    orden.forEach(d=>{
+      const url=URL.createObjectURL(d.file);
+      const dim=d.dim?`${d.dim[0]}×${d.dim[1]}`:'—';
+      const card=document.createElement('div'); card.className='th'+(d===mejor?' keep':'');
+      card.innerHTML=`<img src="${url}" loading="lazy">
+        <div class="m"><span class="tag">${d===mejor?'✓ MEJOR (conservar)':'copia'}</span>
+        ${d.ruta}<br>${dim} · ${(d.size/1024).toFixed(0)} KB</div>`;
+      th.appendChild(card);
+    });
+    div.appendChild(th); R.appendChild(div);
+  });
+}
+</script>
+</body>
+</html>
